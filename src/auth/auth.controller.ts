@@ -1,8 +1,8 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Req, UseGuards, UseInterceptors } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
-import { CurrentUser } from './decorators/current-user.decorator';
-import { Public } from './decorators/public.decorator';
+import { CurrentUser, Public, Roles } from '../common/decorators';
 import { AuthService, AuthResponse } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -14,7 +14,8 @@ import { ResendOtpDto } from './dto/resend-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyWhatsAppDto } from './dto/verify-whatsapp.dto';
 import { ThrottlerLoggingInterceptor } from './interceptors/throttler-logging.interceptor';
-import type { JwtValidatedUser } from './strategies/jwt.strategy';
+import type { JwtValidatedUser } from '../common/types/auth.types';
+import { Role } from '@prisma/client';
 
 /** Límite estricto anti-fuerza bruta: 5 peticiones por minuto en login, verify-whatsapp, reset-password, resend-otp. */
 const STRICT_THROTTLE = { default: { limit: 5, ttl: 60000 } };
@@ -28,6 +29,7 @@ export class AuthController {
 
   @Post('login')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -54,20 +56,28 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({ status: 401, description: 'Credenciales inválidas, cuenta desactivada o no verificada.' })
+  @ApiResponse({ status: 401, description: 'Credenciales inválidas o cuenta temporalmente bloqueada.' })
   @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
   @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
-  async login(@Body() dto: LoginDto): Promise<AuthResponse> {
-    return this.authService.login(dto);
+  async login(
+    @Body() dto: LoginDto,
+    @Req() req: { ip?: string; headers?: { 'user-agent'?: string } },
+  ): Promise<AuthResponse> {
+    const meta = {
+      ip: req.ip ?? req.headers?.['x-forwarded-for'] ?? 'unknown',
+      userAgent: req.headers?.['user-agent'] ?? 'unknown',
+    };
+    return this.authService.login(dto, meta);
   }
 
   @Post('register')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Registro de usuario',
     description:
-      'Crea un nuevo usuario (rol USER por defecto) y envía OTP por WhatsApp. Devuelve 409 si el correo ya está registrado.',
+      'Crea un nuevo usuario (rol USER por defecto) y envía OTP. Devuelve 409 si el correo ya está registrado.',
   })
   @ApiResponse({
     status: 201,
@@ -94,14 +104,15 @@ export class AuthController {
     return this.authService.register(dto);
   }
 
-  @Post('verify-whatsapp')
+  @Post('verify-otp')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Verificar cuenta por WhatsApp',
+    summary: 'Verificar cuenta con código OTP',
     description:
-      'Recibe el email y el código OTP de 6 dígitos enviado por WhatsApp. Si el código coincide y no ha expirado (10 min), marca isVerified=true y limpia verificationCode. Rate limit: 5 peticiones/minuto.',
+      'Recibe el email y el código OTP de 6 dígitos. Si el código coincide y no ha expirado (10 min), marca isVerified=true. Máx. 3 intentos fallidos. Rate limit: 5 peticiones/minuto.',
   })
   @ApiResponse({
     status: 200,
@@ -114,17 +125,18 @@ export class AuthController {
   @ApiResponse({ status: 400, description: 'Código expirado o no hay código pendiente de verificación.' })
   @ApiResponse({ status: 401, description: 'Usuario no encontrado o código incorrecto.' })
   @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
-  async verifyWhatsApp(@Body() dto: VerifyWhatsAppDto): Promise<{ message: string }> {
-    return this.authService.verifyWhatsApp(dto);
+  async verifyOtp(@Body() dto: VerifyWhatsAppDto): Promise<{ message: string }> {
+    return this.authService.verifyOtp(dto);
   }
 
   @Post('forgot-password')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Solicitar recuperación de contraseña',
     description:
-      'Envía un código OTP por WhatsApp al correo indicado (si está registrado). Por seguridad siempre devuelve el mismo mensaje genérico para evitar user enumeration. El código expira en 10 minutos. No requiere Bearer Token.',
+      'Envía un código OTP al teléfono del usuario (si está registrado). Opcional: channel "sms" (por defecto) o "whatsapp". Mensaje genérico para evitar user enumeration. Cooldown 2 min. El código expira en 10 minutos.',
   })
   @ApiResponse({
     status: 200,
@@ -134,7 +146,7 @@ export class AuthController {
       properties: {
         message: {
           type: 'string',
-          example: 'Si el correo está registrado, recibirá un código por WhatsApp en breve.',
+          example: 'Si el correo está registrado, recibirá un código en breve.',
         },
       },
     },
@@ -143,18 +155,30 @@ export class AuthController {
     status: 400,
     description: 'Datos de entrada inválidos (validación DTO).',
   })
-  async forgotPassword(@Body() dto: ForgotPasswordDto): Promise<{ message: string }> {
-    return this.authService.forgotPassword(dto);
+  @ApiResponse({
+    status: 429,
+    description: 'Cooldown: espere 2 minutos antes de solicitar un nuevo código.',
+  })
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+    @Req() req: { ip?: string; headers?: { 'user-agent'?: string } },
+  ): Promise<{ message: string }> {
+    const meta = {
+      ip: req.ip ?? req.headers?.['x-forwarded-for'] ?? 'unknown',
+      userAgent: req.headers?.['user-agent'] ?? 'unknown',
+    };
+    return this.authService.forgotPassword(dto, meta);
   }
 
   @Post('reset-password')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Restablecer contraseña con código OTP',
     description:
-      'Recibe email, código de 6 dígitos (enviado por WhatsApp) y nueva contraseña. Valida que el código no haya expirado y coincida; luego actualiza la contraseña y limpia los campos de restablecimiento. Rate limit: 5 peticiones/minuto.',
+      'Recibe email, código de 6 dígitos y nueva contraseña. Valida OTP (máx. 3 intentos). Rate limit: 5 peticiones/minuto.',
   })
   @ApiResponse({
     status: 200,
@@ -178,6 +202,7 @@ export class AuthController {
 
   @Post('refresh')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Refrescar tokens (Token Rotation)',
@@ -211,12 +236,13 @@ export class AuthController {
 
   @Post('resend-otp')
   @Public()
+  @ApiTags('auth', 'auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Reenviar código OTP de verificación',
     description:
-      'Recibe email. Genera un nuevo verificationCode, actualiza la expiración (10 min) y envía por WhatsApp. Siempre devuelve mensaje genérico para evitar user enumeration. Rate limit: 5 peticiones/minuto.',
+      'Recibe email y opcionalmente channel ("sms" o "whatsapp"). Genera un nuevo código (cooldown 2 min). Mensaje genérico para evitar user enumeration. Rate limit: 5 peticiones/minuto.',
   })
   @ApiResponse({
     status: 200,
@@ -226,20 +252,31 @@ export class AuthController {
       properties: {
         message: {
           type: 'string',
-          example: 'Si el correo está registrado y tiene un código pendiente, recibirá uno nuevo por WhatsApp.',
+          example: 'Si el correo está registrado y tiene un código pendiente, recibirá uno nuevo en breve.',
         },
       },
     },
   })
   @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
-  @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
-  async resendOtp(@Body() dto: ResendOtpDto): Promise<{ message: string }> {
-    return this.authService.resendOtp(dto);
+  @ApiResponse({
+    status: 429,
+    description: 'Too Many Requests o cooldown (2 min entre reenvíos).',
+  })
+  async resendOtp(
+    @Body() dto: ResendOtpDto,
+    @Req() req: { ip?: string; headers?: { 'user-agent'?: string } },
+  ): Promise<{ message: string }> {
+    const meta = {
+      ip: req.ip ?? req.headers?.['x-forwarded-for'] ?? 'unknown',
+      userAgent: req.headers?.['user-agent'] ?? 'unknown',
+    };
+    return this.authService.resendOtp(dto, meta);
   }
 
   @Post('logout')
-  @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('access_token')
+  @ApiTags('auth', 'auth-protected')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cerrar sesión',
     description: 'Limpia el refreshToken del usuario en BD. Requiere Bearer Token. Invalida la sesión para rotación.',
@@ -250,13 +287,21 @@ export class AuthController {
     schema: { type: 'object', properties: { message: { type: 'string', example: 'Sesión cerrada correctamente.' } } },
   })
   @ApiResponse({ status: 401, description: 'Token inválido o expirado.' })
-  async logout(@CurrentUser() user: JwtValidatedUser): Promise<{ message: string }> {
-    return this.authService.logout(user.userId);
+  async logout(
+    @CurrentUser() user: JwtValidatedUser,
+    @Req() req: { headers?: { authorization?: string } },
+  ): Promise<{ message: string }> {
+    const authHeader = req.headers?.authorization;
+    const accessToken = authHeader?.startsWith('Bearer ')
+      ? authHeader.slice(7)
+      : undefined;
+    return this.authService.logout(user.userId, accessToken);
   }
 
   @Patch('change-password')
-  @HttpCode(HttpStatus.OK)
   @ApiBearerAuth('access_token')
+  @ApiTags('auth', 'auth-protected')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cambiar contraseña',
     description:
@@ -275,12 +320,18 @@ export class AuthController {
   async changePassword(
     @CurrentUser() user: JwtValidatedUser,
     @Body() dto: ChangePasswordDto,
+    @Req() req: { ip?: string; headers?: { 'user-agent'?: string } },
   ): Promise<{ message: string }> {
-    return this.authService.changePassword(user.userId, dto);
+    const meta = {
+      ip: req.ip ?? req.headers?.['x-forwarded-for'] ?? 'unknown',
+      userAgent: req.headers?.['user-agent'] ?? 'unknown',
+    };
+    return this.authService.changePassword(user.userId, dto, meta);
   }
 
   @Get('me')
   @ApiBearerAuth('access_token')
+  @ApiTags('auth', 'auth-protected')
   @ApiOperation({
     summary: 'Perfil del usuario actual',
     description:
@@ -296,6 +347,26 @@ export class AuthController {
     description: 'Token inválido, expirado o usuario inactivo.',
   })
   async getMe(@CurrentUser() user: JwtValidatedUser): Promise<MeResponseDto> {
-    return this.authService.getProfile(user.userId);
+    const profile = await this.authService.getProfile(user.userId);
+    return plainToInstance(MeResponseDto, profile, {
+      excludeExtraneousValues: true,
+    });
+  }
+
+  @Get('admin-only')
+  @Roles(Role.ADMIN)
+  @ApiBearerAuth('access_token')
+  @ApiTags('auth', 'auth-admin')
+  @ApiOperation({
+    summary: '[Ejemplo] Solo ADMIN',
+    description: 'Ruta de ejemplo que requiere rol ADMIN. Útil para verificar RolesGuard.',
+  })
+  @ApiResponse({ status: 200, description: 'Acceso concedido.' })
+  @ApiResponse({ status: 403, description: 'Acceso denegado. Se requiere rol ADMIN.' })
+  adminOnly(@CurrentUser('userId') userId: string): { message: string; userId: string } {
+    return {
+      message: 'Acceso concedido. Solo usuarios con rol ADMIN pueden ver esto.',
+      userId,
+    };
   }
 }

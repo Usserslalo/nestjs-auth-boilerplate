@@ -13,27 +13,84 @@ enum Role {
   USER
 }
 
+enum VerificationCodeType {
+  REGISTER
+  PASSWORD_RESET
+}
+
 // --- MODELO DE USUARIO Y AUTENTICACIÓN ---
 
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
   password  String
+  phoneNumber String? @unique
   role      Role     @default(USER)
   isActive  Boolean  @default(true)
-
-  // Verificación por WhatsApp (OTP de 6 dígitos, expira en 10 min)
-  verificationCode   String?
-  isVerified         Boolean   @default(false)
-  verificationExpires DateTime?
-
-  // Recuperación de contraseña (OTP independiente del de verificación)
-  resetPasswordCode   String?
-  resetPasswordExpires DateTime?
+  isVerified Boolean @default(false)
 
   // Refresh token (jti) para rotación segura; se limpia en logout
   refreshToken String?
 
+  // Bloqueo por fuerza bruta: 5 intentos fallidos = bloqueo 15 min
+  loginAttempts Int      @default(0)
+  lockUntil     DateTime?
+
+  verificationCodes VerificationCode[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+// --- CÓDIGOS DE VERIFICACIÓN (OTP) ---
+
+model VerificationCode {
+  id        String                @id @default(uuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  codeHash  String
+  type      VerificationCodeType
+  expiresAt DateTime
+  attempts  Int                   @default(0)
+
+  createdAt DateTime              @default(now())
+
+  @@index([userId, type])
+}
+
+// --- BLACKLIST DE TOKENS (logout global) ---
+
+model BlacklistedToken {
+  id        String   @id @default(uuid())
+  tokenHash String   @unique
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+}
+
+// --- RATE LIMITING PERSISTENTE (Throttler) ---
+
+model ThrottlerRecord {
+  id            String   @id @default(uuid())
+  key           String
+  throttlerName String
+  totalHits     Int      @default(0)
+  expiresAt     DateTime
+  blockExpiresAt DateTime?
+  isBlocked     Boolean  @default(false)
+
+  @@unique([key, throttlerName])
+}
+
+// --- AUDITORÍA DE SEGURIDAD ---
+
+model SecurityAuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  event     String
+  channel   String?  // SMS | WHATSAPP (para eventos OTP_SENT)
+  ip        String
+  userAgent String
+
+  createdAt DateTime @default(now())
 }

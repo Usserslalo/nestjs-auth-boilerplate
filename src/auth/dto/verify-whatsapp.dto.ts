@@ -6,6 +6,7 @@ export class VerifyWhatsAppDto {
     example: 'usuario@example.com',
     description: 'Email del usuario que recibió el código',
   })
+  @IsString()
   @IsEmail({}, { message: 'El email debe ser un correo válido' })
   @IsNotEmpty({ message: 'El email es obligatorio' })
   email: string;

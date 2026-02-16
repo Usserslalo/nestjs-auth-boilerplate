@@ -5,9 +5,9 @@ import {
   Injectable,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { Role } from '@prisma/client';
+import type { Role } from '@prisma/client';
 import { ROLES_KEY } from '../decorators/roles.decorator';
-import { JwtValidatedUser } from '../strategies/jwt.strategy';
+import type { JwtValidatedUser } from '../types/auth.types';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -26,15 +26,19 @@ export class RolesGuard implements CanActivate {
     const { user } = context.switchToHttp().getRequest<{ user: JwtValidatedUser }>();
 
     if (!user) {
-      throw new ForbiddenException('No se pudo verificar el rol del usuario');
+      throw new ForbiddenException({
+        message: 'No se pudo verificar el rol del usuario',
+        errorCode: 'AUTH_FORBIDDEN',
+      });
     }
 
     const hasRole = requiredRoles.some((role) => user.role === role);
 
     if (!hasRole) {
-      throw new ForbiddenException(
-        `Acceso denegado. Se requiere uno de los siguientes roles: ${requiredRoles.join(', ')}`,
-      );
+      throw new ForbiddenException({
+        message: `Acceso denegado. Se requiere uno de los siguientes roles: ${requiredRoles.join(', ')}`,
+        errorCode: 'AUTH_FORBIDDEN',
+      });
     }
 
     return true;

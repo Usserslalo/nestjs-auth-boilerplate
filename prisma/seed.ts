@@ -1,9 +1,7 @@
 import 'dotenv/config';
-import * as bcrypt from 'bcrypt';
+import * as argon2 from 'argon2';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
-
-const SALT_ROUNDS = 10;
 
 const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
@@ -14,9 +12,13 @@ const adapter = new PrismaPg({ connectionString });
 const prisma = new PrismaClient({ adapter }) as any;
 
 const ADMIN_PASSWORD = 'Admin#123';
-const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, SALT_ROUNDS);
 
 async function main() {
+  const hashedPassword = await argon2.hash(ADMIN_PASSWORD, {
+    type: argon2.argon2id,
+    memoryCost: 65536,
+    timeCost: 2,
+  });
   console.log('🌱 Iniciando seed genérico...');
 
   await prisma.user.deleteMany();

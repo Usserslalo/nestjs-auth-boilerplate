@@ -5,11 +5,14 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { Role } from '@prisma/client';
-import * as bcrypt from 'bcrypt';
+import { Role, VerificationCodeType } from '@prisma/client';
+import * as argon2 from 'argon2';
 import { randomUUID } from 'crypto';
+import { BlacklistService } from '../common/services/blacklist.service';
+import { SecurityLogService } from '../common/services/security-log.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { MessagingService } from './messaging.service';
+import { OtpService } from './otp.service';
 import { ROLES } from './constants/roles';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -19,20 +22,28 @@ import { ResendOtpDto } from './dto/resend-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { VerifyWhatsAppDto } from './dto/verify-whatsapp.dto';
 
-const SALT_ROUNDS = 10;
-const VERIFICATION_EXPIRES_MINUTES = 10;
-const RESET_PASSWORD_EXPIRES_MINUTES = 10;
-const OTP_LENGTH = 6;
+/** Parámetros Argon2 recomendados: argon2id, 64 MiB memoria, 2 iteraciones. */
+const ARGON2_OPTIONS: argon2.Options = {
+  type: argon2.argon2id,
+  memoryCost: 65536, // 64 MiB
+  timeCost: 2,
+};
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCK_DURATION_MINUTES = 15;
 const ACCESS_TOKEN_EXPIRES_SEC = 3600; // 1h
 const REFRESH_TOKEN_EXPIRES_SEC = 604800; // 7d
 
 /** Mensaje genérico para evitar user enumeration en recuperación de contraseña. */
 const FORGOT_PASSWORD_RESPONSE_MESSAGE =
-  'Si el correo está registrado, recibirá un código por WhatsApp en breve.';
+  'Si el correo está registrado, recibirá un código en breve.';
 
 /** Mensaje genérico para resend OTP (evitar user enumeration). */
 const RESEND_OTP_RESPONSE_MESSAGE =
-  'Si el correo está registrado y tiene un código pendiente, recibirá uno nuevo por WhatsApp.';
+  'Si el correo está registrado y tiene un código pendiente, recibirá uno nuevo en breve.';
+
+/** Mensaje genérico en login para evitar user enumeration (usuario no existe, contraseña incorrecta o cuenta bloqueada). */
+const LOGIN_INVALID_CREDENTIALS_MESSAGE =
+  'Credenciales inválidas o cuenta temporalmente bloqueada.';
 
 export interface JwtPayload {
   sub: string;
@@ -44,6 +55,11 @@ export interface RefreshTokenPayload extends JwtPayload {
   jti: string;
 }
 
+export interface RequestMeta {
+  ip: string;
+  userAgent: string;
+}
+
 export interface AuthResponse {
   access_token: string;
   refresh_token: string;
@@ -51,6 +67,7 @@ export interface AuthResponse {
     id: string;
     email: string;
     role: Role;
+    phoneNumber?: string | null;
   };
 }
 
@@ -59,32 +76,97 @@ export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
-    private readonly whatsAppService: WhatsAppService,
+    private readonly blacklistService: BlacklistService,
+    private readonly otpService: OtpService,
+    private readonly messagingService: MessagingService,
+    private readonly securityLog: SecurityLogService,
   ) {}
 
-  async login(dto: LoginDto): Promise<AuthResponse> {
+  async login(dto: LoginDto, meta?: RequestMeta): Promise<AuthResponse> {
+    const ip = meta?.ip ?? 'unknown';
+    const userAgent = meta?.userAgent ?? 'unknown';
+
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        phoneNumber: true,
+        password: true,
+        isActive: true,
+        isVerified: true,
+        loginAttempts: true,
+        lockUntil: true,
+      },
     });
 
     if (!user) {
-      throw new UnauthorizedException('Credenciales inválidas');
+      await this.securityLog.log('LOGIN_FAILED', { ip, userAgent });
+      throw new UnauthorizedException(LOGIN_INVALID_CREDENTIALS_MESSAGE);
     }
 
-    if (!user.isActive) {
-      throw new UnauthorizedException('Cuenta desactivada');
+    if (user.lockUntil && user.lockUntil > new Date()) {
+      await this.securityLog.log('ACCOUNT_LOCKED', {
+        ip,
+        userAgent,
+        userId: user.id,
+      });
+      throw new UnauthorizedException(LOGIN_INVALID_CREDENTIALS_MESSAGE);
     }
 
-    const isPasswordValid = await bcrypt.compare(dto.password, user.password);
+    if (!user.isActive || !user.isVerified) {
+      await this.securityLog.log('LOGIN_FAILED', {
+        ip,
+        userAgent,
+        userId: user.id,
+      });
+      throw new UnauthorizedException(LOGIN_INVALID_CREDENTIALS_MESSAGE);
+    }
+
+    const isPasswordValid = await argon2.verify(user.password, dto.password);
     if (!isPasswordValid) {
-      throw new UnauthorizedException('Credenciales inválidas');
+      const newAttempts = user.loginAttempts + 1;
+      const lockUntil =
+        newAttempts >= MAX_LOGIN_ATTEMPTS
+          ? new Date(Date.now() + LOCK_DURATION_MINUTES * 60 * 1000)
+          : null;
+
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: {
+          loginAttempts: newAttempts,
+          lockUntil,
+        },
+      });
+
+      if (newAttempts >= MAX_LOGIN_ATTEMPTS) {
+        await this.securityLog.log('ACCOUNT_LOCKED', {
+          ip,
+          userAgent,
+          userId: user.id,
+        });
+      } else {
+        await this.securityLog.log('LOGIN_FAILED', {
+          ip,
+          userAgent,
+          userId: user.id,
+        });
+      }
+
+      throw new UnauthorizedException(LOGIN_INVALID_CREDENTIALS_MESSAGE);
     }
 
-    if (!user.isVerified) {
-      throw new UnauthorizedException(
-        'Debe verificar su cuenta antes de iniciar sesión. Revise su WhatsApp para el código.',
-      );
-    }
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { loginAttempts: 0, lockUntil: null },
+    });
+
+    await this.securityLog.log('LOGIN_SUCCESS', {
+      ip,
+      userAgent,
+      userId: user.id,
+    });
 
     const tokens = await this.issueTokenPair(user.id, user.email, user.role);
 
@@ -94,6 +176,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         role: user.role,
+        phoneNumber: user.phoneNumber ?? null,
       },
     };
   }
@@ -139,7 +222,14 @@ export class AuthService {
     const { sub, jti } = payload;
     const user = await this.prisma.user.findUnique({
       where: { id: sub },
-      select: { id: true, email: true, role: true, refreshToken: true, isActive: true },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        phoneNumber: true,
+        refreshToken: true,
+        isActive: true,
+      },
     });
 
     if (!user || !user.isActive || user.refreshToken !== jti) {
@@ -154,25 +244,40 @@ export class AuthService {
         id: user.id,
         email: user.email,
         role: user.role,
+        phoneNumber: user.phoneNumber ?? null,
       },
     };
   }
 
   /**
-   * Logout: limpia refreshToken del usuario en BD (invalida sesión para rotación).
+   * Logout: limpia refreshToken del usuario, añade el access token a la blacklist
+   * (invalida sesión para rotación y bloquea el token hasta su expiración).
    */
-  async logout(userId: string): Promise<{ message: string }> {
+  async logout(userId: string, accessToken?: string): Promise<{ message: string }> {
     await this.prisma.user.update({
       where: { id: userId },
       data: { refreshToken: null },
     });
+
+    if (accessToken) {
+      const decoded = this.jwtService.decode(accessToken) as { exp?: number } | null;
+      const expiresAt = decoded?.exp
+        ? new Date(decoded.exp * 1000)
+        : new Date(Date.now() + ACCESS_TOKEN_EXPIRES_SEC * 1000);
+      await this.blacklistService.add(accessToken, expiresAt);
+    }
+
     return { message: 'Sesión cerrada correctamente.' };
   }
 
   /**
    * Cambio de contraseña (protegido por JWT). Valida contraseña actual; invalida refresh tokens.
    */
-  async changePassword(userId: string, dto: ChangePasswordDto): Promise<{ message: string }> {
+  async changePassword(
+    userId: string,
+    dto: ChangePasswordDto,
+    meta?: RequestMeta,
+  ): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { id: true, password: true },
@@ -182,86 +287,110 @@ export class AuthService {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    const isCurrentValid = await bcrypt.compare(dto.currentPassword, user.password);
+    const isCurrentValid = await argon2.verify(user.password, dto.currentPassword);
     if (!isCurrentValid) {
       throw new UnauthorizedException('Contraseña actual incorrecta');
     }
 
-    const hashedPassword = await bcrypt.hash(dto.newPassword, SALT_ROUNDS);
+    const hashedPassword = await argon2.hash(dto.newPassword, ARGON2_OPTIONS);
 
     await this.prisma.user.update({
       where: { id: userId },
       data: { password: hashedPassword, refreshToken: null },
     });
 
+    await this.securityLog.log('PASSWORD_CHANGED', {
+      ip: meta?.ip ?? 'unknown',
+      userAgent: meta?.userAgent ?? 'unknown',
+      userId,
+    });
+
     return { message: 'Contraseña actualizada correctamente. Inicie sesión de nuevo.' };
   }
 
   /**
-   * Reenvío de OTP de verificación. Mensaje genérico para evitar user enumeration.
+   * Reenvío de OTP de verificación. Cooldown 2 min. Mensaje genérico para evitar user enumeration.
+   * Solo envía si el usuario tiene phoneNumber registrado. Canal opcional: sms (por defecto) o whatsapp.
    */
-  async resendOtp(dto: ResendOtpDto): Promise<{ message: string }> {
+  async resendOtp(
+    dto: ResendOtpDto,
+    meta?: RequestMeta,
+  ): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
+      select: { id: true, phoneNumber: true },
     });
 
     if (!user) {
       return { message: RESEND_OTP_RESPONSE_MESSAGE };
     }
 
-    const verificationCode = this.generateOtp();
-    const verificationExpires = new Date(
-      Date.now() + VERIFICATION_EXPIRES_MINUTES * 60 * 1000,
-    );
+    const channel = dto.channel ?? 'sms';
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: { verificationCode, verificationExpires },
+    if (user.phoneNumber) {
+      const code = await this.otpService.create(user.id, VerificationCodeType.REGISTER);
+await this.messagingService.sendOtp(user.phoneNumber, code, channel, 'register');
+    await this.securityLog.log('OTP_SENT', {
+      ip: meta?.ip ?? 'unknown',
+      userAgent: meta?.userAgent ?? 'unknown',
+      userId: user.id,
+      channel: channel === 'sms' ? 'SMS' : 'WHATSAPP',
     });
-
-    this.whatsAppService.sendVerificationCode(verificationCode);
-
-    return { message: RESEND_OTP_RESPONSE_MESSAGE };
   }
 
+  return { message: RESEND_OTP_RESPONSE_MESSAGE };
+}
+
   /**
-   * Registro: crea un User básico (rol USER por defecto) y envía OTP por WhatsApp.
+   * Registro: crea un User con email, phoneNumber y contraseña (rol USER por defecto) y envía OTP al teléfono.
    */
   async register(dto: RegisterDto): Promise<AuthResponse> {
-    const existing = await this.prisma.user.findUnique({
+    const existingByEmail = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
-
-    if (existing) {
+    if (existingByEmail) {
       throw new ConflictException(
         'Ya existe un usuario registrado con este correo electrónico',
       );
     }
 
-    const hashedPassword = await bcrypt.hash(dto.password, SALT_ROUNDS);
+    const existingByPhone = await this.prisma.user.findUnique({
+      where: { phoneNumber: dto.phoneNumber },
+    });
+    if (existingByPhone) {
+      throw new ConflictException(
+        'Ya existe un usuario registrado con este número de teléfono',
+      );
+    }
 
-    const verificationCode = this.generateOtp();
-    const verificationExpires = new Date(
-      Date.now() + VERIFICATION_EXPIRES_MINUTES * 60 * 1000,
-    );
+    const hashedPassword = await argon2.hash(dto.password, ARGON2_OPTIONS);
 
     const user = await this.prisma.user.create({
       data: {
         email: dto.email,
+        phoneNumber: dto.phoneNumber,
         password: hashedPassword,
         role: ROLES.USER,
         isVerified: false,
-        verificationCode,
-        verificationExpires,
       },
       select: {
         id: true,
         email: true,
         role: true,
+        phoneNumber: true,
       },
     });
 
-    this.whatsAppService.sendVerificationCode(verificationCode);
+    const channel = dto.channel ?? 'sms';
+
+    const code = await this.otpService.create(user.id, VerificationCodeType.REGISTER);
+    await this.messagingService.sendOtp(user.phoneNumber!, code, channel, 'register');
+    await this.securityLog.log('OTP_SENT', {
+      ip: 'unknown',
+      userAgent: 'unknown',
+      userId: user.id,
+      channel: channel === 'sms' ? 'SMS' : 'WHATSAPP',
+    });
 
     const tokens = await this.issueTokenPair(user.id, user.email, user.role);
 
@@ -271,54 +400,50 @@ export class AuthService {
         id: user.id,
         email: user.email,
         role: user.role,
+        phoneNumber: user.phoneNumber ?? null,
       },
     };
   }
 
   /**
-   * Genera un OTP numérico de 6 dígitos.
-   */
-  private generateOtp(): string {
-    const min = 10 ** (OTP_LENGTH - 1);
-    const max = 10 ** OTP_LENGTH - 1;
-    const code = Math.floor(min + Math.random() * (max - min + 1)).toString();
-    return code;
-  }
-
-  /**
    * Solicitud de recuperación de contraseña.
-   * Siempre devuelve el mismo mensaje genérico (exista o no el usuario) para evitar user enumeration.
+   * Genera OTP con cooldown 2 min. Solo envía si el usuario tiene phoneNumber.
+   * Canal opcional: sms (por defecto) o whatsapp. Mensaje genérico para evitar user enumeration.
    */
-  async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
+  async forgotPassword(
+    dto: ForgotPasswordDto,
+    meta?: RequestMeta,
+  ): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
+      select: { id: true, phoneNumber: true },
     });
 
     if (!user) {
       return { message: FORGOT_PASSWORD_RESPONSE_MESSAGE };
     }
 
-    const resetPasswordCode = this.generateOtp();
-    const resetPasswordExpires = new Date(
-      Date.now() + RESET_PASSWORD_EXPIRES_MINUTES * 60 * 1000,
-    );
+    const channel = dto.channel ?? 'sms';
 
-    await this.prisma.user.update({
-      where: { id: user.id },
-      data: {
-        resetPasswordCode,
-        resetPasswordExpires,
-      },
-    });
-
-    this.whatsAppService.sendResetPasswordCode(resetPasswordCode);
+    if (user.phoneNumber) {
+      const code = await this.otpService.create(
+        user.id,
+        VerificationCodeType.PASSWORD_RESET,
+      );
+      await this.messagingService.sendOtp(user.phoneNumber, code, channel, 'password_reset');
+      await this.securityLog.log('OTP_SENT', {
+        ip: meta?.ip ?? 'unknown',
+        userAgent: meta?.userAgent ?? 'unknown',
+        userId: user.id,
+        channel: channel === 'sms' ? 'SMS' : 'WHATSAPP',
+      });
+    }
 
     return { message: FORGOT_PASSWORD_RESPONSE_MESSAGE };
   }
 
   /**
-   * Restablece la contraseña con el código OTP recibido por WhatsApp.
-   * Usa campos resetPasswordCode/resetPasswordExpires (independientes del flujo de verificación).
+   * Restablece la contraseña con el código OTP. Valida OTP vía OtpService.
    */
   async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
@@ -329,38 +454,26 @@ export class AuthService {
       throw new BadRequestException('Código inválido o expirado. Solicite uno nuevo.');
     }
 
-    if (!user.resetPasswordCode || !user.resetPasswordExpires) {
-      throw new BadRequestException(
-        'No hay código de restablecimiento pendiente. Solicite uno nuevo.',
-      );
-    }
+    await this.otpService.verify(
+      user.id,
+      VerificationCodeType.PASSWORD_RESET,
+      dto.code,
+    );
 
-    if (user.resetPasswordExpires < new Date()) {
-      throw new BadRequestException('El código ha expirado. Solicite uno nuevo.');
-    }
-
-    if (user.resetPasswordCode !== dto.code) {
-      throw new UnauthorizedException('Código de restablecimiento incorrecto');
-    }
-
-    const hashedPassword = await bcrypt.hash(dto.newPassword, SALT_ROUNDS);
+    const hashedPassword = await argon2.hash(dto.newPassword, ARGON2_OPTIONS);
 
     await this.prisma.user.update({
       where: { id: user.id },
-      data: {
-        password: hashedPassword,
-        resetPasswordCode: null,
-        resetPasswordExpires: null,
-      },
+      data: { password: hashedPassword },
     });
 
     return { message: 'Contraseña restablecida correctamente. Ya puede iniciar sesión.' };
   }
 
   /**
-   * Verifica el código WhatsApp y marca la cuenta como verificada.
+   * Verifica el código OTP y marca la cuenta como verificada.
    */
-  async verifyWhatsApp(dto: VerifyWhatsAppDto): Promise<{ message: string }> {
+  async verifyOtp(dto: VerifyWhatsAppDto): Promise<{ message: string }> {
     const user = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -369,27 +482,11 @@ export class AuthService {
       throw new UnauthorizedException('Usuario no encontrado');
     }
 
-    if (!user.verificationCode || !user.verificationExpires) {
-      throw new BadRequestException(
-        'No hay código pendiente de verificación. Solicite uno nuevo registrándose.',
-      );
-    }
-
-    if (user.verificationExpires < new Date()) {
-      throw new BadRequestException('El código ha expirado. Solicite uno nuevo.');
-    }
-
-    if (user.verificationCode !== dto.code) {
-      throw new UnauthorizedException('Código de verificación incorrecto');
-    }
+    await this.otpService.verify(user.id, VerificationCodeType.REGISTER, dto.code);
 
     await this.prisma.user.update({
       where: { id: user.id },
-      data: {
-        isVerified: true,
-        verificationCode: null,
-        verificationExpires: null,
-      },
+      data: { isVerified: true },
     });
 
     return { message: 'Cuenta verificada correctamente. Ya puede iniciar sesión.' };
@@ -414,7 +511,7 @@ export class AuthService {
   }
 
   /**
-   * Obtiene el perfil del usuario autenticado (id, email, role, isVerified). Nunca devuelve password.
+   * Obtiene el perfil del usuario autenticado (id, email, role, isVerified, phoneNumber). Nunca devuelve password.
    */
   async getProfile(userId: string) {
     const user = await this.prisma.user.findFirst({
@@ -427,6 +524,7 @@ export class AuthService {
         email: true,
         role: true,
         isVerified: true,
+        phoneNumber: true,
       },
     });
 
@@ -439,6 +537,7 @@ export class AuthService {
       email: user.email,
       role: user.role,
       isVerified: user.isVerified,
+      phoneNumber: user.phoneNumber ?? null,
     };
   }
 }

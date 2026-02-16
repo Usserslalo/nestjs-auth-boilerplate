@@ -3,7 +3,11 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { MessagingService } from './messaging.service';
+import { OtpService } from './otp.service';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { BlacklistService } from '../common/services/blacklist.service';
+import { SecurityLogService } from '../common/services/security-log.service';
 
 const jwtSecret = process.env.JWT_SECRET;
 if (!jwtSecret) {
@@ -22,7 +26,7 @@ if (!jwtSecret) {
       },
     }),
   ],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, BlacklistService, OtpService, MessagingService, SecurityLogService],
   controllers: [AuthController],
   exports: [AuthService, JwtModule],
 })
