@@ -86,11 +86,12 @@ model ThrottlerRecord {
 
 model SecurityAuditLog {
   id        String   @id @default(uuid())
-  userId    String?
+  userId    String?  // Quien realizó la acción (ej. adminId en eventos ADMIN_*)
   event     String
   channel   String?  // SMS | WHATSAPP (para eventos OTP_SENT)
   ip        String
   userAgent String
+  metadata  Json?    // Datos extra por evento (targetUserId, newStatus, requestId, oldRole, newRole, etc.)
 
   createdAt DateTime @default(now())
 }

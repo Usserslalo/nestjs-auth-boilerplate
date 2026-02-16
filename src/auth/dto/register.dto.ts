@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsEmail, IsIn, IsNotEmpty, IsOptional, IsString, Matches, MinLength } from 'class-validator';
 
 /** Formato E.164: + seguido de 1-15 dígitos (sin espacios ni guiones). */
@@ -9,6 +10,7 @@ export class RegisterDto {
     example: 'usuario@ejemplo.com',
     description: 'Correo electrónico (único en el sistema)',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @IsString()
   @IsEmail({}, { message: 'El email debe ser un correo válido' })
   @IsNotEmpty({ message: 'El email es obligatorio' })
@@ -16,8 +18,10 @@ export class RegisterDto {
 
   @ApiProperty({
     example: '+527711440305',
-    description: 'Teléfono en formato E.164. Se usa para enviar el OTP por SMS o WhatsApp según "channel".',
+    description: 'Teléfono en formato E.164 (+ seguido de 1-15 dígitos). Se usa para enviar el OTP por SMS o WhatsApp según channel.',
+    pattern: '^\\+[1-9]\\d{1,14}$',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty({ message: 'El número de teléfono es obligatorio' })
   @Matches(E164_REGEX, {

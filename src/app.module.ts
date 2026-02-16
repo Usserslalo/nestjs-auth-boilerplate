@@ -1,11 +1,12 @@
 import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { JwtAuthGuard, RolesGuard } from './common/guards';
+import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { validateEnv } from './common/config/env.validation';
@@ -13,6 +14,8 @@ import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { RequestIdInterceptor } from './common/interceptors/request-id.interceptor';
 import { ThrottlerStorageModule } from './common/throttler-storage.module';
 import { PrismaThrottlerStorage } from './common/storage/prisma-throttler.storage';
+import { PrismaClientExceptionFilter } from './common/filters/prisma-client-exception.filter';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 @Module({
   imports: [
@@ -38,10 +41,13 @@ import { PrismaThrottlerStorage } from './common/storage/prisma-throttler.storag
       imports: [ThrottlerStorageModule],
     }),
     AuthModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
+    { provide: APP_FILTER, useClass: PrismaClientExceptionFilter },
+    { provide: APP_FILTER, useClass: HttpExceptionFilter },
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,

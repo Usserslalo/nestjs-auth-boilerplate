@@ -1,98 +1,148 @@
-# NestJS Auth Boilerplate — Seguridad de Grado Empresarial
+# 🚀 NestJS Ultra-Secure Auth Boilerplate
 
-Una **base sólida** para proyectos NestJS con autenticación, autorización y controles de seguridad listos para producción. Diseñado para servir como cimiento reutilizable en APIs, SaaS o backends que exigen estándares de seguridad elevados y una arquitectura clara.
+[![NestJS](https://img.shields.io/badge/NestJS-11-E0234E?logo=nestjs&logoColor=white)](https://nestjs.com/)
+[![Prisma](https://img.shields.io/badge/Prisma-7-2D3748?logo=prisma&logoColor=white)](https://www.prisma.io/)
+[![Node.js](https://img.shields.io/badge/Node.js-22+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![License](https://img.shields.io/badge/License-UNLICENSED-lightgrey)](./LICENSE)
 
----
-
-## Descripción
-
-Este **boilerplate genérico de autenticación y seguridad** ofrece:
-
-- **Seguridad de grado empresarial**: JWT con rotación de refresh tokens, contraseñas hasheadas con bcrypt, verificación por OTP y protección frente a fuerza bruta.
-- **Arquitectura reutilizable**: modelo de usuario minimalista (solo `User`), roles ADMIN/USER y flujos desacoplados para integrar con cualquier dominio de negocio.
-- **Listo para portafolio**: código estructurado, documentación Swagger, buenas prácticas (DTOs, guards, manejo de excepciones) y sin lógica de negocio específica.
-
-Ideal para arrancar nuevos proyectos NestJS, demostrar competencias en backend seguro o como referencia de implementación de auth en Node.js.
+> **Production-Ready** — Plantilla de autenticación y autorización diseñada para **escalabilidad** y **máxima seguridad**. Ideal para APIs, SaaS y backends que exigen estándares empresariales, auditoría trazable y cero concesiones en identidad y resiliencia.
 
 ---
 
-## Stack Tecnológico
+## 📋 Tabla de contenidos
 
-| Tecnología           | Uso                                           |
-|----------------------|-----------------------------------------------|
-| **NestJS**           | Framework backend, módulos, guards, DTOs     |
-| **Prisma 7**        | ORM con Driver Adapter (PostgreSQL)           |
-| **PostgreSQL**      | Base de datos principal                       |
-| **JWT** (@nestjs/jwt) | Access y refresh tokens, firma y verificación |
-| **Bcrypt**           | Hash de contraseñas (salt rounds: 10)         |
-| **Throttler**       | Rate limiting global y por ruta                |
-| **Passport**        | Estrategia JWT para autenticación             |
-| **class-validator** | Validación de DTOs                            |
-| **Swagger (OpenAPI)** | Documentación de API y Bearer JWT           |
+- [Propuesta de valor](#-propuesta-de-valor)
+- [Core Features](#-core-features)
+- [Tech Stack](#-tech-stack)
+- [Arquitectura de errores (RFC 7807)](#-arquitectura-de-errores-rfc-7807)
+- [Guía de inicio rápido](#-guía-de-inicio-rápido)
+- [Documentación de API](#-documentación-de-api)
+- [Modo desarrollo vs producción](#-modo-desarrollo-vs-producción)
+- [Licencia](#-licencia)
 
 ---
 
-## Características Implementadas
+## 💎 Propuesta de valor
 
-### Seguridad Élite: Access & Refresh Tokens con rotación automática
+Este **boilerplate** no es un prototipo: es **infraestructura de producción**. Ofrece una base reutilizable con:
 
-- **Access Token**: JWT con expiración de **1 hora** (configurable con `JWT_ACCESS_EXPIRES_IN`). Incluye `sub` (userId), `email` y `role`. Uso típico en header `Authorization: Bearer <token>`.
-- **Refresh Token**: JWT de **7 días** con `jti` (UUID) persistido en el modelo `User`. En cada `POST /auth/refresh` se valida el token contra BD y se emite un **nuevo par** (Token Rotation); el refresh anterior queda invalidado.
-- **Logout**: `POST /auth/logout` limpia el `refreshToken` en BD, cerrando la sesión de forma segura.
+- **Seguridad por defecto**: JWT con secretos independientes (Access/Refresh), rotación de tokens, OTP por SMS/WhatsApp, bloqueo por fuerza bruta y rate limiting persistente.
+- **Datos limpios y consistentes**: Sanitización automática en DTOs (trim, lowercase en emails), validación estricta y errores estándar (RFC 7807).
+- **Panel de administración**: Gestión de usuarios con paginación real, filtros dinámicos y auditoría imborrable de acciones administrativas.
+- **Resiliencia**: Headers `Retry-After` en 429, throttling por ruta y registro de eventos de seguridad en base de datos.
 
-### WhatsApp OTP: Verificación y recuperación de cuenta (simulado)
-
-- **Registro**: se crea un `User` (rol USER), se genera un OTP de 6 dígitos (expira en 10 min) y se “envía” por WhatsApp; por ahora el mensaje se imprime en consola del servidor para pruebas sin integración real.
-- **Verificación**: `POST /auth/verify-whatsapp` (email + code) marca `isVerified = true` y limpia el código. El login solo se permite con cuenta verificada.
-- **Reenvío de OTP**: `POST /auth/resend-otp` (email) genera un nuevo código y actualiza la expiración; respuesta genérica para evitar user enumeration.
-- **Recuperación de contraseña**: `POST /auth/forgot-password` (email) y `POST /auth/reset-password` (email, code, newPassword) usan campos independientes del OTP de verificación.
-
-### Protección Anti-Spam: Rate limiting en rutas sensibles
-
-- **Global**: 100 peticiones/minuto por defecto (ThrottlerGuard como `APP_GUARD`).
-- **Rutas sensibles**: **5 peticiones por minuto** en `login`, `verify-whatsapp`, `reset-password` y `resend-otp` para limitar fuerza bruta y abuso. Respuesta **429 Too Many Requests** al superar el límite.
-
-### Roles (RBAC): Jerarquía ADMIN y USER lista para usar
-
-- **Roles**: `ADMIN` y `USER` (enum en Prisma; nuevo usuario por defecto: `USER`).
-- **Decoradores**: `@Public()` (ruta sin JWT), `@Roles(ROLES.ADMIN)` o `@Roles(ROLES.USER)` (junto a `RolesGuard`), `@CurrentUser()` (inyecta userId, email, role).
-- **Guards**: `JwtAuthGuard` global (todas las rutas protegidas salvo `@Public()`); `RolesGuard` para restringir por rol.
+Construye tu producto sobre una base que ya cumple con buenas prácticas de seguridad y mantenibilidad.
 
 ---
 
-## Guía de Inicio
+## ✨ Core Features
 
-### 1. Clonar e instalar dependencias
+| Área | Característica | Descripción |
+|------|----------------|-------------|
+| 🔐 **Seguridad Pro** | JWT dual (Access + Refresh) | Secretos independientes; Access 1h, Refresh 7d. Rotación de `jti` en cada refresh; logout invalida sesión en BD. |
+| 🔐 **Seguridad Pro** | Contraseñas | Hash con **Argon2id** (64 MiB, 2 iteraciones). Nunca se exponen en respuestas ni logs. |
+| 🆔 **Identidad** | OTP vía SMS/WhatsApp | Integración **Twilio**; códigos de 6 dígitos con expiración configurable. Verificación de cuenta y recuperación de contraseña. |
+| 🆔 **Identidad** | Mock para desarrollo | Sin credenciales Twilio: **MockMessagingService** imprime códigos en consola para trabajar offline. |
+| 📊 **Gestión de datos** | Prisma 7 + PostgreSQL | ORM con Driver Adapter; migraciones versionadas; modelo User + VerificationCode, Blacklist, Throttler, SecurityAuditLog. |
+| 📊 **Gestión de datos** | Sanitización automática | Emails: `trim` + `toLowerCase`. Teléfonos y búsquedas: `trim`. ValidationPipe con `transform: true`. |
+| 👥 **Panel de administración** | Gestión de usuarios | Listado paginado, filtros por rol, estado y verificación; búsqueda insensible a mayúsculas en email/teléfono; ordenamiento configurable. |
+| 👥 **Panel de administración** | Acciones administrativas | Activar/desactivar usuario (banear); cambiar rol (ADMIN/USER). Auditoría con adminId, targetUserId, requestId en `SecurityAuditLog`. |
+| 🛡️ **Resiliencia** | Rate limiting persistente | Throttler con almacenamiento en PostgreSQL; límites por ruta (ej. 5/min en login, verify, reset-password). |
+| 🛡️ **Resiliencia** | Bloqueo por fuerza bruta | 5 intentos fallidos de login → cuenta bloqueada 15 min. Eventos `LOGIN_FAILED` y `ACCOUNT_LOCKED` en auditoría. |
+| 🛡️ **Resiliencia** | Headers Retry-After | En respuestas 429 se incluye `Retry-After` (segundos) para que el cliente sepa cuándo reintentar. |
+| 📜 **Auditoría** | Eventos de seguridad | `LOGIN_SUCCESS`, `LOGIN_FAILED`, `ACCOUNT_LOCKED`, `PASSWORD_CHANGED`, `OTP_SENT`. |
+| 📜 **Auditoría** | Acciones administrativas | `ADMIN_USER_STATUS_CHANGE` y `ADMIN_USER_ROLE_CHANGE` con metadata (adminId, targetUserId, newStatus/oldRole/newRole, requestId). |
+
+---
+
+## 🛠 Tech Stack
+
+| Tecnología | Uso |
+|------------|-----|
+| **NestJS 11** | Framework backend, módulos, guards, interceptors, pipes. |
+| **Prisma 7** | ORM con Driver Adapter para PostgreSQL. |
+| **PostgreSQL** | Base de datos principal. |
+| **Argon2** | Hash de contraseñas (argon2id). |
+| **Zod** | Validación de variables de entorno al arranque. |
+| **Twilio SDK** | Envío de SMS/WhatsApp para OTP (opcional; Mock si no hay credenciales). |
+| **@nestjs/jwt** | Emisión y verificación de Access y Refresh tokens. |
+| **Passport + JWT** | Estrategia de autenticación para rutas protegidas. |
+| **class-validator / class-transformer** | Validación y transformación de DTOs. |
+| **Swagger (OpenAPI)** | Documentación interactiva en `/docs`. |
+| **Helmet + compression** | Seguridad de cabeceras HTTP y compresión de respuestas. |
+
+---
+
+## 📐 Arquitectura de errores (RFC 7807)
+
+Todas las respuestas **4xx y 5xx** siguen un formato estándar tipo **RFC 7807**: mismo esquema JSON, códigos de error claros y trazabilidad con `requestId` y cabecera `X-Request-ID`.
+
+### Ejemplo de respuesta de error
+
+```json
+{
+  "success": false,
+  "statusCode": 400,
+  "errorCode": "BAD_REQUEST",
+  "message": "El email debe ser un correo válido",
+  "path": "/api/auth/login",
+  "timestamp": "2026-02-16T12:00:00.000Z",
+  "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "errors": [
+    "email must be an email",
+    "password must be longer than or equal to 6 characters"
+  ]
+}
+```
+
+| Campo | Descripción |
+|-------|-------------|
+| `statusCode` | Código HTTP (400, 401, 403, 404, 409, 422, 429, 500). |
+| `errorCode` | Slug interno (ej. `AUTH_UNAUTHORIZED`, `RATE_LIMIT_EXCEEDED`, `NOT_FOUND`). |
+| `message` | Mensaje legible; en auth se evita user enumeration. |
+| `path` | Ruta de la petición. |
+| `timestamp` | ISO 8601. |
+| `requestId` | ID único de la petición (también en cabecera). |
+| `errors` | Opcional; detalle por campo en errores de validación. |
+
+---
+
+## 🏁 Guía de inicio rápido
+
+### 1. Instalación
 
 ```bash
 git clone <repo>
-cd <proyecto>
+cd nestjs-auth-boilerplate
 npm install
 ```
 
-### 2. Configurar variables de entorno
+### 2. Configuración de entorno
 
-Copia el archivo de ejemplo y rellena los valores (nunca subas `.env` al repositorio):
+Copia el archivo de ejemplo y configura las variables críticas (nunca subas `.env` al repositorio):
 
 ```bash
 cp .env.example .env
 ```
 
-Edita `.env` con al menos:
+Variables críticas:
 
-| Variable        | Obligatoria | Descripción |
-|-----------------|-------------|-------------|
-| `DATABASE_URL`  | Sí          | URL de PostgreSQL (ej. `postgresql://user:pass@localhost:5432/mi_db`) |
-| `JWT_SECRET`    | Sí          | Clave secreta para firmar JWTs (larga y aleatoria en producción) |
-| `JWT_ACCESS_EXPIRES_IN` | No  | Expiración del access token en segundos (por defecto: 3600) |
-| `PORT`          | No          | Puerto del servidor (por defecto: 3000) |
+| Variable | Obligatoria | Descripción |
+|----------|-------------|-------------|
+| `DATABASE_URL` | ✅ | URL de PostgreSQL (ej. `postgresql://user:pass@localhost:5432/auth_db`) |
+| `JWT_SECRET` | ✅ | Secreto para Access token (mín. 32 caracteres). Ej: `openssl rand -base64 32` |
+| `JWT_REFRESH_SECRET` | ✅ | Secreto distinto para Refresh token (mín. 32 caracteres). |
+| `JWT_ACCESS_EXPIRES_IN` | No | Segundos de vida del Access token (default: 3600). |
+| `JWT_REFRESH_EXPIRES_IN` | No | Segundos de vida del Refresh token (default: 2592000). |
+| `PORT` | No | Puerto del servidor (default: 3000). |
+| `TWILIO_*` | No | Si están vacías, se usa **MockMessagingService** (códigos en consola). |
 
 ### 3. Base de datos: migraciones y seed
 
 Aplicar migraciones (Prisma 7):
 
 ```bash
-npx prisma migrate deploy
+npx prisma migrate dev
 ```
 
 Cargar usuario de prueba (ADMIN, verificado):
@@ -114,47 +164,65 @@ npm run build
 npm run start:prod
 ```
 
-- **API**: `http://localhost:3000/api`
-- **Swagger**: `http://localhost:3000/docs` — usar **Authorize** con el token devuelto por `POST /auth/login` para probar rutas protegidas.
+- **API base**: `http://localhost:3000/api`
+- **Documentación**: `http://localhost:3000/docs`
 
 ---
 
-## Documentación de API (Swagger)
+## 📚 Documentación de API
 
-La API está documentada en **OpenAPI** en la ruta `/docs`. Incluye:
-
-- Descripción de cada endpoint de auth (login, register, verify-whatsapp, refresh, logout, change-password, resend-otp, forgot-password, reset-password, me).
-- Esquema Bearer JWT (`access_token`); uso del botón **Authorize** para enviar el token en las peticiones protegidas.
-- Códigos de respuesta documentados: 200, 201, 400, 401, 403, 409, 429.
-
----
-
-## Estructura del Módulo de Autenticación
+La API está documentada en **OpenAPI (Swagger)** en:
 
 ```
-src/auth/
-├── auth.controller.ts   # Endpoints públicos y protegidos
-├── auth.service.ts      # Lógica: tokens, OTP, cambio de contraseña, perfil
-├── auth.module.ts       # JwtModule, PassportModule, JwtStrategy
-├── constants/roles.ts    # ROLES (ADMIN, USER)
-├── decorators/          # @Public(), @Roles(), @CurrentUser()
-├── dto/                 # LoginDto, RegisterDto, VerifyWhatsAppDto, etc.
-├── guards/              # JwtAuthGuard, RolesGuard
-├── interceptors/        # ThrottlerLoggingInterceptor (log temporal)
-└── strategies/          # JwtStrategy
+http://localhost:3000/docs
+```
+
+- Endpoints de auth (login, register, verify-whatsapp, refresh, logout, change-password, resend-otp, forgot-password, reset-password, me).
+- Endpoints de administración (listar usuarios, cambiar estado, cambiar rol).
+- Uso del botón **Authorize**: introduce el `access_token` devuelto por `POST /auth/login` (formato Bearer) para probar rutas protegidas y de admin.
+- Códigos de respuesta documentados: 200, 201, 400, 401, 403, 404, 409, 422, 429, 500.
+
+---
+
+## 🔄 Modo desarrollo vs producción
+
+| Aspecto | Desarrollo | Producción |
+|---------|------------|------------|
+| **Mensajería OTP** | Si `TWILIO_*` están vacías → **MockMessagingService**: los códigos se imprimen en la consola del servidor. Permite trabajar sin credenciales Twilio. | Configura `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` y `TWILIO_PHONE_NUMBER` para envío real por SMS/WhatsApp. |
+| **CORS** | Por defecto se permiten orígenes locales (ej. `localhost:3000`, `localhost:5173`). | Define `CORS_ORIGINS` con los dominios permitidos, separados por comas. |
+| **Secrets** | Puedes usar valores de ejemplo solo en local. | Usa secretos largos y aleatorios; nunca los subas al repositorio. |
+
+---
+
+## 📁 Estructura del módulo de autenticación
+
+```
+src/
+├── auth/
+│   ├── auth.controller.ts    # Endpoints públicos y protegidos
+│   ├── auth.service.ts       # Lógica: tokens, OTP, cambio de contraseña, perfil
+│   ├── auth.module.ts        # JwtModule, PassportModule, SecurityLogService
+│   ├── constants/roles.ts    # ROLES (ADMIN, USER)
+│   ├── dto/                  # LoginDto, RegisterDto, VerifyWhatsAppDto, etc.
+│   ├── guards/               # JwtAuthGuard, RolesGuard
+│   ├── strategies/           # JwtStrategy
+│   └── ...
+├── admin/
+│   ├── admin-users.service.ts
+│   ├── users.controller.ts  # GET/PATCH usuarios (solo ADMIN)
+│   └── dto/
+├── common/
+│   ├── services/security-log.service.ts  # Auditoría
+│   ├── dto/rfc7807-error.dto.ts
+│   ├── filters/              # PrismaClientException, HttpException
+│   └── ...
+└── prisma/
+    ├── schema.prisma
+    └── migrations/
 ```
 
 ---
 
-## Mejores Prácticas Implementadas
+## 📜 Licencia
 
-- **DTOs y validación**: todos los cuerpos validados con `class-validator`; `ValidationPipe` global con `whitelist` y `forbidNonWhitelisted`.
-- **Seguridad por defecto**: rutas protegidas por JWT; contraseñas y tokens sensibles nunca expuestos en respuestas; refresh token almacenado como `jti` para rotación y logout.
-- **Manejo de excepciones**: códigos HTTP claros (401, 403, 409, 429) y mensajes genéricos donde se evita user enumeration (forgot-password, resend-otp).
-- **Código mantenible**: constantes para roles y tiempos; separación entre servicios, guards y estrategias; modelo de datos minimalista (solo `User`).
-
----
-
-## Licencia
-
-UNLICENSED (proyecto privado). Ajustar según la política de tu organización.
+**UNLICENSED** (proyecto privado). Ajustar según la política de tu organización.

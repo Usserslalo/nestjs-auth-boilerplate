@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsEmail, IsIn, IsNotEmpty, IsOptional, IsString } from 'class-validator';
 
 export class ResendOtpDto {
@@ -6,6 +7,7 @@ export class ResendOtpDto {
     example: 'usuario@ejemplo.com',
     description: 'Correo electrónico para reenviar el código de verificación OTP',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @IsString()
   @IsEmail({}, { message: 'El email debe ser un correo válido' })
   @IsNotEmpty({ message: 'El email es obligatorio' })

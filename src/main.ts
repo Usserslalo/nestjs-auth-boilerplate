@@ -7,7 +7,6 @@ import { ClassSerializerInterceptor, Logger, ValidationPipe } from '@nestjs/comm
 import helmet from 'helmet';
 import compression from 'compression';
 import { validateEnv, type Env } from './common/config/env.validation';
-import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 const env: Env = validateEnv();
 const logger = new Logger('Bootstrap');
@@ -36,7 +35,6 @@ async function bootstrap() {
     credentials: true,
   });
 
-  app.useGlobalFilters(new HttpExceptionFilter());
   app.useGlobalInterceptors(
     new ClassSerializerInterceptor(app.get(Reflector), {
       strategy: 'exposeAll',
@@ -53,25 +51,33 @@ async function bootstrap() {
     }),
   );
 
-  // Configuración de Swagger
+  // Documentación OpenAPI (Swagger)
   const config = new DocumentBuilder()
     .setTitle('NestJS Auth Boilerplate API')
     .setDescription(
-      'API de autenticación y seguridad: JWT, OTP, RBAC, rate limiting. Rutas públicas: login, register, verify-otp, forgot-password, reset-password, refresh, resend-otp. Resto requiere Bearer Token.',
+      'API REST de autenticación y autorización con estándares de seguridad para producción. ' +
+        'Incluye JWT (access + refresh con rotación), OTP por SMS/WhatsApp, RBAC (ADMIN/USER), ' +
+        'rate limiting persistente y auditoría. Las rutas públicas son: login, register, verify-otp, ' +
+        'forgot-password, reset-password, refresh y resend-otp. El resto requiere cabecera Authorization: Bearer <access_token>. ' +
+        'Los errores siguen un formato RFC 7807 (statusCode, errorCode, message, path, timestamp, requestId).',
     )
     .setVersion('1.0')
     .addBearerAuth(
-      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT', in: 'header' },
+      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT', in: 'header', name: 'Authorization' },
       'access_token',
     )
-    .addTag('auth', 'Autenticación y seguridad')
+    .addTag('Raíz', 'Health check y bienvenida')
+    .addTag('Autenticación', 'Login, registro, OTP, refresh y logout')
     .addTag('auth-public', 'Rutas públicas (sin JWT)')
     .addTag('auth-protected', 'Rutas protegidas (requieren JWT)')
     .addTag('auth-admin', 'Solo rol ADMIN')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('docs', app, document);
+  SwaggerModule.setup('docs', app, document, {
+    swaggerOptions: { persistAuthorization: true },
+    customSiteTitle: 'NestJS Auth Boilerplate — API Docs',
+  });
 
   const port = env.PORT ?? 3000;
   await app.listen(port);

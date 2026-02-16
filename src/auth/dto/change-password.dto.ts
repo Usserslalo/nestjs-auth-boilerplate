@@ -4,7 +4,7 @@ import { IsNotEmpty, IsString, Matches, MinLength } from 'class-validator';
 export class ChangePasswordDto {
   @ApiProperty({
     example: 'MiClaveActual#123',
-    description: 'Contraseña actual (para validar identidad)',
+    description: 'Contraseña actual del usuario (para validar identidad antes del cambio).',
   })
   @IsString()
   @IsNotEmpty({ message: 'La contraseña actual es obligatoria' })
@@ -12,7 +12,7 @@ export class ChangePasswordDto {
 
   @ApiProperty({
     example: 'NuevaClave#456',
-    description: 'Nueva contraseña (mínimo 6 caracteres, al menos una letra y un número)',
+    description: 'Nueva contraseña. Mínimo 6 caracteres; al menos una letra y un número.',
     minLength: 6,
   })
   @IsString()

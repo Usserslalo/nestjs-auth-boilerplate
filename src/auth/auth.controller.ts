@@ -1,9 +1,21 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Patch, Post, Req, UseGuards, UseInterceptors } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBadRequestResponse,
+  ApiBearerAuth,
+  ApiConflictResponse,
+  ApiCreatedResponse,
+  ApiForbiddenResponse,
+  ApiOkResponse,
+  ApiOperation,
+  ApiTags,
+  ApiTooManyRequestsResponse,
+  ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { Rfc7807ErrorDto } from '../common/dto/rfc7807-error.dto';
 import { CurrentUser, Public, Roles } from '../common/decorators';
-import { AuthService, AuthResponse } from './auth.service';
+import { AuthService, AuthResponse, RegisterResponse } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
@@ -17,10 +29,12 @@ import { ThrottlerLoggingInterceptor } from './interceptors/throttler-logging.in
 import type { JwtValidatedUser } from '../common/types/auth.types';
 import { Role } from '@prisma/client';
 
-/** Límite estricto anti-fuerza bruta: 5 peticiones por minuto en login, verify-whatsapp, reset-password, resend-otp. */
+/** Límite estricto anti-fuerza bruta: 5 peticiones por minuto en login, verify-otp, reset-password, resend-otp, forgot-password. */
 const STRICT_THROTTLE = { default: { limit: 5, ttl: 60000 } };
+/** Límite para refresh: 20 rotaciones por minuto para evitar abuso. */
+const REFRESH_THROTTLE = { default: { limit: 20, ttl: 60000 } };
 
-@ApiTags('auth')
+@ApiTags('Autenticación', 'auth')
 @Controller('auth')
 @UseGuards(ThrottlerGuard)
 @UseInterceptors(ThrottlerLoggingInterceptor)
@@ -29,17 +43,16 @@ export class AuthController {
 
   @Post('login')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Iniciar sesión',
     description:
-      'Valida email y contraseña y devuelve access_token (1h) y refresh_token (7d). Devuelve 401 si las credenciales son inválidas. Rate limit: 5 peticiones/minuto.',
+      'Valida email y contraseña y devuelve access_token (1h) y refresh_token (7d). Devuelve 401 si las credenciales son inválidas, la cuenta no está verificada (use POST /auth/verify-otp) o la cuenta está bloqueada. Rate limit: 5 peticiones/minuto.',
   })
-  @ApiResponse({
-    status: 200,
-    description: 'Login exitoso. Devuelve access_token, refresh_token y datos del usuario.',
+  @ApiOkResponse({
+    description: 'Login exitoso. Devuelve access_token, refresh_token y user (id, email, role, phoneNumber).',
     schema: {
       type: 'object',
       properties: {
@@ -51,14 +64,25 @@ export class AuthController {
             id: { type: 'string', format: 'uuid' },
             email: { type: 'string', example: 'carlos.mendoza@gmail.com' },
             role: { type: 'string', enum: ['ADMIN', 'USER'] },
+            phoneNumber: { type: 'string', nullable: true },
           },
         },
       },
     },
   })
-  @ApiResponse({ status: 401, description: 'Credenciales inválidas o cuenta temporalmente bloqueada.' })
-  @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
-  @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
+  @ApiBadRequestResponse({
+    description: 'Datos de entrada inválidos (validación DTO).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiUnauthorizedResponse({
+    description:
+      'Credenciales inválidas, cuenta no verificada (verifique con POST /auth/verify-otp), cuenta bloqueada por intentos fallidos o temporalmente bloqueada. errorCode: AUTH_UNAUTHORIZED.',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Límite de 5 peticiones por minuto excedido. Incluye header Retry-After.',
+    type: Rfc7807ErrorDto,
+  })
   async login(
     @Body() dto: LoginDto,
     @Req() req: { ip?: string; headers?: { 'user-agent'?: string } },
@@ -72,16 +96,16 @@ export class AuthController {
 
   @Post('register')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({
     summary: 'Registro de usuario',
     description:
-      'Crea un nuevo usuario (rol USER por defecto) y envía OTP. Devuelve 409 si el correo ya está registrado.',
+      'Crea un nuevo usuario (rol USER por defecto), envía OTP al teléfono y devuelve tokens. Incluye requiresVerification: true y mensaje para que el frontend muestre la pantalla de verificación (POST /auth/verify-otp). Devuelve 409 si el correo o teléfono ya están registrados.',
   })
-  @ApiResponse({
-    status: 201,
-    description: 'Registro exitoso. Devuelve access_token, refresh_token y datos del usuario.',
+  @ApiCreatedResponse({
+    description:
+      'Registro exitoso. Incluye tokens, user, requiresVerification: true y mensaje indicando verificar con el código enviado al teléfono.',
     schema: {
       type: 'object',
       properties: {
@@ -92,21 +116,33 @@ export class AuthController {
           properties: {
             id: { type: 'string', format: 'uuid' },
             email: { type: 'string', example: 'usuario@example.com' },
-            role: { type: 'string', example: 'USER' },
+            role: { type: 'string', enum: ['ADMIN', 'USER'] },
+            phoneNumber: { type: 'string', nullable: true },
           },
+        },
+        requiresVerification: { type: 'boolean', example: true },
+        message: {
+          type: 'string',
+          example: 'Usuario registrado con éxito. Por favor, verifica tu cuenta con el código enviado a tu teléfono.',
         },
       },
     },
   })
-  @ApiResponse({ status: 409, description: 'Ya existe un usuario con este correo electrónico.' })
-  @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
-  async register(@Body() dto: RegisterDto): Promise<AuthResponse> {
+  @ApiBadRequestResponse({
+    description: 'Datos de entrada inválidos (validación DTO).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiConflictResponse({
+    description: 'Ya existe un usuario con este correo electrónico o número de teléfono.',
+    type: Rfc7807ErrorDto,
+  })
+  async register(@Body() dto: RegisterDto): Promise<RegisterResponse> {
     return this.authService.register(dto);
   }
 
   @Post('verify-otp')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -114,32 +150,40 @@ export class AuthController {
     description:
       'Recibe el email y el código OTP de 6 dígitos. Si el código coincide y no ha expirado (10 min), marca isVerified=true. Máx. 3 intentos fallidos. Rate limit: 5 peticiones/minuto.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Cuenta verificada correctamente. El usuario ya puede iniciar sesión.',
     schema: {
       type: 'object',
       properties: { message: { type: 'string', example: 'Cuenta verificada correctamente. Ya puede iniciar sesión.' } },
     },
   })
-  @ApiResponse({ status: 400, description: 'Código expirado o no hay código pendiente de verificación.' })
-  @ApiResponse({ status: 401, description: 'Usuario no encontrado o código incorrecto.' })
-  @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
+  @ApiBadRequestResponse({
+    description: 'Código expirado o no hay código pendiente de verificación.',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Usuario no encontrado o código incorrecto (máx. 3 intentos).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Límite de 5 peticiones por minuto excedido.',
+    type: Rfc7807ErrorDto,
+  })
   async verifyOtp(@Body() dto: VerifyWhatsAppDto): Promise<{ message: string }> {
     return this.authService.verifyOtp(dto);
   }
 
   @Post('forgot-password')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
+  @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Solicitar recuperación de contraseña',
     description:
-      'Envía un código OTP al teléfono del usuario (si está registrado). Opcional: channel "sms" (por defecto) o "whatsapp". Mensaje genérico para evitar user enumeration. Cooldown 2 min. El código expira en 10 minutos.',
+      'Envía un código OTP al teléfono del usuario (si está registrado). Opcional: channel "sms" (por defecto) o "whatsapp". Mensaje genérico para evitar user enumeration. Cooldown 2 min. Rate limit: 5 peticiones/minuto.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Siempre 200 con mensaje genérico (no revela si el email existe).',
     schema: {
       type: 'object',
@@ -151,13 +195,13 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({
-    status: 400,
+  @ApiBadRequestResponse({
     description: 'Datos de entrada inválidos (validación DTO).',
+    type: Rfc7807ErrorDto,
   })
-  @ApiResponse({
-    status: 429,
-    description: 'Cooldown: espere 2 minutos antes de solicitar un nuevo código.',
+  @ApiTooManyRequestsResponse({
+    description: 'Too Many Requests (5/min) o cooldown 2 min. Incluye header Retry-After en segundos.',
+    type: Rfc7807ErrorDto,
   })
   async forgotPassword(
     @Body() dto: ForgotPasswordDto,
@@ -172,7 +216,7 @@ export class AuthController {
 
   @Post('reset-password')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -180,8 +224,7 @@ export class AuthController {
     description:
       'Recibe email, código de 6 dígitos y nueva contraseña. Valida OTP (máx. 3 intentos). Rate limit: 5 peticiones/minuto.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Contraseña restablecida correctamente. El usuario ya puede iniciar sesión.',
     schema: {
       type: 'object',
@@ -190,27 +233,33 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({
-    status: 400,
+  @ApiBadRequestResponse({
     description: 'Código expirado, no hay código pendiente o datos inválidos (ej. contraseña no cumple requisitos).',
+    type: Rfc7807ErrorDto,
   })
-  @ApiResponse({ status: 401, description: 'Código de restablecimiento incorrecto.' })
-  @ApiResponse({ status: 429, description: 'Too Many Requests. Límite de 5 peticiones por minuto excedido.' })
+  @ApiUnauthorizedResponse({
+    description: 'Código de restablecimiento incorrecto (máx. 3 intentos).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Límite de 5 peticiones por minuto excedido.',
+    type: Rfc7807ErrorDto,
+  })
   async resetPassword(@Body() dto: ResetPasswordDto): Promise<{ message: string }> {
     return this.authService.resetPassword(dto);
   }
 
   @Post('refresh')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
+  @Throttle(REFRESH_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Refrescar tokens (Token Rotation)',
     description:
-      'Recibe el refresh_token, lo valida y compara con el jti persistido en BD. Emite un nuevo par access_token (1h) y refresh_token (7d). Invalida el refresh anterior. No requiere Bearer Token.',
+      'Recibe el refresh_token, lo valida con JWT_REFRESH_SECRET y compara el jti con BD. Emite un nuevo par access_token (1h) y refresh_token (7d). Invalida el refresh anterior. Rate limit: 20 peticiones/minuto. No requiere Bearer Token.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Nuevo par de tokens emitido.',
     schema: {
       type: 'object',
@@ -223,20 +272,31 @@ export class AuthController {
             id: { type: 'string', format: 'uuid' },
             email: { type: 'string' },
             role: { type: 'string', enum: ['ADMIN', 'USER'] },
+            phoneNumber: { type: 'string', nullable: true },
           },
         },
       },
     },
   })
-  @ApiResponse({ status: 401, description: 'Refresh token inválido, expirado o ya utilizado.' })
-  @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
+  @ApiBadRequestResponse({
+    description: 'Datos de entrada inválidos (validación DTO).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Refresh token inválido, expirado o ya utilizado.',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiTooManyRequestsResponse({
+    description: 'Límite de 20 peticiones por minuto excedido.',
+    type: Rfc7807ErrorDto,
+  })
   async refresh(@Body() dto: RefreshTokenDto): Promise<AuthResponse> {
     return this.authService.refreshTokens(dto.refreshToken);
   }
 
   @Post('resend-otp')
   @Public()
-  @ApiTags('auth', 'auth-public')
+  @ApiTags('auth-public')
   @Throttle(STRICT_THROTTLE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
@@ -244,8 +304,7 @@ export class AuthController {
     description:
       'Recibe email y opcionalmente channel ("sms" o "whatsapp"). Genera un nuevo código (cooldown 2 min). Mensaje genérico para evitar user enumeration. Rate limit: 5 peticiones/minuto.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Mensaje genérico (no revela si el email existe o si se reenvió el código).',
     schema: {
       type: 'object',
@@ -257,10 +316,13 @@ export class AuthController {
       },
     },
   })
-  @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO).' })
-  @ApiResponse({
-    status: 429,
+  @ApiBadRequestResponse({
+    description: 'Datos de entrada inválidos (validación DTO).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiTooManyRequestsResponse({
     description: 'Too Many Requests o cooldown (2 min entre reenvíos).',
+    type: Rfc7807ErrorDto,
   })
   async resendOtp(
     @Body() dto: ResendOtpDto,
@@ -275,18 +337,21 @@ export class AuthController {
 
   @Post('logout')
   @ApiBearerAuth('access_token')
-  @ApiTags('auth', 'auth-protected')
+  @ApiTags('auth-protected')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cerrar sesión',
-    description: 'Limpia el refreshToken del usuario en BD. Requiere Bearer Token. Invalida la sesión para rotación.',
+    description:
+      'Siempre limpia el jti (refreshToken) del usuario en BD, invalidando el refresh token. Si se envía Authorization: Bearer <token>, además se blacklistea el access token para revocación inmediata. Si no se envía Bearer, solo se invalida el refresh (el access seguirá válido hasta su expiración).',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Sesión cerrada correctamente.',
     schema: { type: 'object', properties: { message: { type: 'string', example: 'Sesión cerrada correctamente.' } } },
   })
-  @ApiResponse({ status: 401, description: 'Token inválido o expirado.' })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido, expirado o revocado.',
+    type: Rfc7807ErrorDto,
+  })
   async logout(
     @CurrentUser() user: JwtValidatedUser,
     @Req() req: { headers?: { authorization?: string } },
@@ -300,23 +365,28 @@ export class AuthController {
 
   @Patch('change-password')
   @ApiBearerAuth('access_token')
-  @ApiTags('auth', 'auth-protected')
+  @ApiTags('auth-protected')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary: 'Cambiar contraseña',
     description:
       'Valida la contraseña actual antes de permitir el cambio. Requiere Bearer Token. Invalida refresh tokens (debe iniciar sesión de nuevo).',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Contraseña actualizada correctamente.',
     schema: {
       type: 'object',
       properties: { message: { type: 'string', example: 'Contraseña actualizada correctamente. Inicie sesión de nuevo.' } },
     },
   })
-  @ApiResponse({ status: 401, description: 'Token inválido o contraseña actual incorrecta.' })
-  @ApiResponse({ status: 400, description: 'Datos de entrada inválidos (validación DTO, ej. nueva contraseña no cumple requisitos).' })
+  @ApiBadRequestResponse({
+    description: 'Datos de entrada inválidos (ej. nueva contraseña no cumple requisitos).',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido, expirado o contraseña actual incorrecta.',
+    type: Rfc7807ErrorDto,
+  })
   async changePassword(
     @CurrentUser() user: JwtValidatedUser,
     @Body() dto: ChangePasswordDto,
@@ -331,20 +401,19 @@ export class AuthController {
 
   @Get('me')
   @ApiBearerAuth('access_token')
-  @ApiTags('auth', 'auth-protected')
+  @ApiTags('auth-protected')
   @ApiOperation({
     summary: 'Perfil del usuario actual',
     description:
-      'Devuelve el perfil del usuario autenticado (id, email, role, isVerified). Requiere Bearer Token. Nunca expone el campo password.',
+      'Devuelve el perfil del usuario autenticado (id, email, role, isVerified, phoneNumber). Requiere Bearer Token. Nunca expone password.',
   })
-  @ApiResponse({
-    status: 200,
+  @ApiOkResponse({
     description: 'Perfil del usuario actual.',
     type: MeResponseDto,
   })
-  @ApiResponse({
-    status: 401,
+  @ApiUnauthorizedResponse({
     description: 'Token inválido, expirado o usuario inactivo.',
+    type: Rfc7807ErrorDto,
   })
   async getMe(@CurrentUser() user: JwtValidatedUser): Promise<MeResponseDto> {
     const profile = await this.authService.getProfile(user.userId);
@@ -356,13 +425,29 @@ export class AuthController {
   @Get('admin-only')
   @Roles(Role.ADMIN)
   @ApiBearerAuth('access_token')
-  @ApiTags('auth', 'auth-admin')
+  @ApiTags('auth-admin')
   @ApiOperation({
     summary: '[Ejemplo] Solo ADMIN',
     description: 'Ruta de ejemplo que requiere rol ADMIN. Útil para verificar RolesGuard.',
   })
-  @ApiResponse({ status: 200, description: 'Acceso concedido.' })
-  @ApiResponse({ status: 403, description: 'Acceso denegado. Se requiere rol ADMIN.' })
+  @ApiOkResponse({
+    description: 'Acceso concedido.',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Acceso concedido. Solo usuarios con rol ADMIN pueden ver esto.' },
+        userId: { type: 'string', format: 'uuid' },
+      },
+    },
+  })
+  @ApiUnauthorizedResponse({
+    description: 'Token inválido o expirado.',
+    type: Rfc7807ErrorDto,
+  })
+  @ApiForbiddenResponse({
+    description: 'Acceso denegado. Se requiere rol ADMIN.',
+    type: Rfc7807ErrorDto,
+  })
   adminOnly(@CurrentUser('userId') userId: string): { message: string; userId: string } {
     return {
       message: 'Acceso concedido. Solo usuarios con rol ADMIN pueden ver esto.',

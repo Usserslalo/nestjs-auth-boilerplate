@@ -1,17 +1,14 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { Request } from 'express';
 import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ErrorCode } from '../../common/constants/error-codes';
 import type { JwtValidatedUser } from '../../common/types/auth.types';
 import { BlacklistService } from '../../common/services/blacklist.service';
 import { AuthService, JwtPayload } from '../auth.service';
 
 export type { JwtValidatedUser };
-
-const jwtSecret: string = process.env.JWT_SECRET ?? '';
-if (!jwtSecret) {
-  throw new Error('JWT_SECRET no está definida. Configura la variable de entorno.');
-}
 
 const extractBearerToken = ExtractJwt.fromAuthHeaderAsBearerToken();
 
@@ -20,11 +17,12 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     private readonly authService: AuthService,
     private readonly blacklistService: BlacklistService,
+    config: ConfigService,
   ) {
     super({
       jwtFromRequest: extractBearerToken,
       ignoreExpiration: false,
-      secretOrKey: jwtSecret,
+      secretOrKey: config.getOrThrow<string>('JWT_SECRET'),
       passReqToCallback: true,
     });
   }
@@ -36,7 +34,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       if (isBlacklisted) {
         throw new UnauthorizedException({
           message: 'Token revocado. Inicie sesión de nuevo.',
-          errorCode: 'AUTH_TOKEN_REVOKED',
+          errorCode: ErrorCode.AUTH_TOKEN_REVOKED,
         });
       }
     }

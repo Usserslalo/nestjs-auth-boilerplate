@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import type { Role } from '@prisma/client';
+import { ErrorCode } from '../constants/error-codes';
 import { ROLES_KEY } from '../decorators/roles.decorator';
 import type { JwtValidatedUser } from '../types/auth.types';
 
@@ -28,7 +29,7 @@ export class RolesGuard implements CanActivate {
     if (!user) {
       throw new ForbiddenException({
         message: 'No se pudo verificar el rol del usuario',
-        errorCode: 'AUTH_FORBIDDEN',
+        errorCode: ErrorCode.AUTH_FORBIDDEN,
       });
     }
 
@@ -37,7 +38,7 @@ export class RolesGuard implements CanActivate {
     if (!hasRole) {
       throw new ForbiddenException({
         message: `Acceso denegado. Se requiere uno de los siguientes roles: ${requiredRoles.join(', ')}`,
-        errorCode: 'AUTH_FORBIDDEN',
+        errorCode: ErrorCode.AUTH_FORBIDDEN,
       });
     }
 

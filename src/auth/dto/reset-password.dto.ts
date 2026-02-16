@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsEmail, IsNotEmpty, IsString, Length, Matches, MinLength } from 'class-validator';
 
 export class ResetPasswordDto {
@@ -6,6 +7,7 @@ export class ResetPasswordDto {
     example: 'usuario@ejemplo.com',
     description: 'Correo electrónico de la cuenta',
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @IsString()
   @IsEmail({}, { message: 'El email debe ser un correo válido' })
   @IsNotEmpty({ message: 'El email es obligatorio' })
@@ -17,6 +19,7 @@ export class ResetPasswordDto {
     minLength: 6,
     maxLength: 6,
   })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty({ message: 'El código es obligatorio' })
   @Length(6, 6, { message: 'El código debe tener exactamente 6 dígitos' })

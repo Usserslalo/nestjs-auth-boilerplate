@@ -9,22 +9,40 @@ import type { Role } from '@prisma/client';
 @Exclude()
 export class UserSafeDto {
   @Expose()
-  @ApiProperty({ format: 'uuid' })
+  @ApiProperty({
+    format: 'uuid',
+    description: 'Identificador único del usuario.',
+    example: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+  })
   id: string;
 
   @Expose()
-  @ApiProperty({ example: 'usuario@ejemplo.com' })
+  @ApiProperty({
+    example: 'usuario@ejemplo.com',
+    description: 'Correo electrónico del usuario (único).',
+  })
   email: string;
 
   @Expose()
-  @ApiProperty({ enum: ['ADMIN', 'USER'] })
+  @ApiProperty({
+    enum: ['ADMIN', 'USER'],
+    description: 'Rol del usuario para RBAC.',
+  })
   role: Role;
 
   @Expose()
-  @ApiProperty({ required: false })
+  @ApiProperty({
+    required: false,
+    description: 'Si la cuenta fue verificada por OTP.',
+  })
   isVerified?: boolean;
 
   @Expose()
-  @ApiProperty({ example: '+5491112345678', required: false })
+  @ApiProperty({
+    example: '+5491112345678',
+    required: false,
+    description: 'Teléfono en formato E.164 (destino de códigos OTP).',
+    nullable: true,
+  })
   phoneNumber?: string | null;
 }

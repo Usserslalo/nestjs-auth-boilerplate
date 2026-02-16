@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
+import { ErrorCode } from '../constants/error-codes';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 
 @Injectable()
@@ -33,7 +34,7 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     if (!user) {
       throw new UnauthorizedException({
         message: 'Token inválido o expirado',
-        errorCode: 'AUTH_UNAUTHORIZED',
+        errorCode: ErrorCode.AUTH_UNAUTHORIZED,
       });
     }
     return user;

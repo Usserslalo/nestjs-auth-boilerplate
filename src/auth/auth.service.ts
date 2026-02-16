@@ -4,6 +4,7 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { Role, VerificationCodeType } from '@prisma/client';
 import * as argon2 from 'argon2';
@@ -30,8 +31,8 @@ const ARGON2_OPTIONS: argon2.Options = {
 };
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOCK_DURATION_MINUTES = 15;
+/** Fallback para expiración del access token al blacklistear (logout). */
 const ACCESS_TOKEN_EXPIRES_SEC = 3600; // 1h
-const REFRESH_TOKEN_EXPIRES_SEC = 604800; // 7d
 
 /** Mensaje genérico para evitar user enumeration en recuperación de contraseña. */
 const FORGOT_PASSWORD_RESPONSE_MESSAGE =
@@ -71,16 +72,29 @@ export interface AuthResponse {
   };
 }
 
+/** Respuesta de registro: AuthResponse + indicador y mensaje para verificación OTP. */
+export interface RegisterResponse extends AuthResponse {
+  requiresVerification: true;
+  message: string;
+}
+
 @Injectable()
 export class AuthService {
+  private readonly jwtRefreshSecret: string;
+  private readonly jwtRefreshExpiresIn: number;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly config: ConfigService,
     private readonly blacklistService: BlacklistService,
     private readonly otpService: OtpService,
     private readonly messagingService: MessagingService,
     private readonly securityLog: SecurityLogService,
-  ) {}
+  ) {
+    this.jwtRefreshSecret = this.config.getOrThrow<string>('JWT_REFRESH_SECRET');
+    this.jwtRefreshExpiresIn = this.config.get<number>('JWT_REFRESH_EXPIRES_IN') ?? 604800;
+  }
 
   async login(dto: LoginDto, meta?: RequestMeta): Promise<AuthResponse> {
     const ip = meta?.ip ?? 'unknown';
@@ -182,7 +196,8 @@ export class AuthService {
   }
 
   /**
-   * Emite access_token (1h) y refresh_token (7d con jti); persiste jti en User para rotación.
+   * Emite access_token (config por defecto del JwtModule) y refresh_token (JWT_REFRESH_SECRET y JWT_REFRESH_EXPIRES_IN).
+   * Persiste jti en User para rotación.
    */
   private async issueTokenPair(
     userId: string,
@@ -193,11 +208,10 @@ export class AuthService {
     const jti = randomUUID();
     const refreshPayload: RefreshTokenPayload = { ...payload, jti };
 
-    const access_token = this.jwtService.sign(payload, {
-      expiresIn: ACCESS_TOKEN_EXPIRES_SEC,
-    });
+    const access_token = this.jwtService.sign(payload);
     const refresh_token = this.jwtService.sign(refreshPayload, {
-      expiresIn: REFRESH_TOKEN_EXPIRES_SEC,
+      secret: this.jwtRefreshSecret,
+      expiresIn: this.jwtRefreshExpiresIn,
     });
 
     await this.prisma.user.update({
@@ -209,12 +223,14 @@ export class AuthService {
   }
 
   /**
-   * Refresh tokens (Token Rotation): valida refresh_token, compara jti con BD, emite nuevo par.
+   * Refresh tokens (Token Rotation): valida refresh_token con JWT_REFRESH_SECRET, compara jti con BD, emite nuevo par.
    */
   async refreshTokens(refreshToken: string): Promise<AuthResponse> {
     let payload: RefreshTokenPayload;
     try {
-      payload = this.jwtService.verify<RefreshTokenPayload>(refreshToken);
+      payload = this.jwtService.verify<RefreshTokenPayload>(refreshToken, {
+        secret: this.jwtRefreshSecret,
+      });
     } catch {
       throw new UnauthorizedException('Refresh token inválido o expirado');
     }
@@ -343,8 +359,9 @@ await this.messagingService.sendOtp(user.phoneNumber, code, channel, 'register')
 
   /**
    * Registro: crea un User con email, phoneNumber y contraseña (rol USER por defecto) y envía OTP al teléfono.
+   * Devuelve tokens y requiresVerification: true para que el frontend muestre la pantalla de verificación.
    */
-  async register(dto: RegisterDto): Promise<AuthResponse> {
+  async register(dto: RegisterDto): Promise<RegisterResponse> {
     const existingByEmail = await this.prisma.user.findUnique({
       where: { email: dto.email },
     });
@@ -402,6 +419,9 @@ await this.messagingService.sendOtp(user.phoneNumber, code, channel, 'register')
         role: user.role,
         phoneNumber: user.phoneNumber ?? null,
       },
+      requiresVerification: true,
+      message:
+        'Usuario registrado con éxito. Por favor, verifica tu cuenta con el código enviado a tu teléfono.',
     };
   }
 
